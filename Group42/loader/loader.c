@@ -7,8 +7,7 @@ int fd;
 void *s;
 int no_of_page_faults = 0;
 int total_no_of_pages = 0;
-double total_internal_fragmentation = 0;
-int remaining_segment_size = 0;
+int total_internal_fragmentation = 0;
 
 /*
  * release memory and other cleanups
@@ -19,6 +18,8 @@ void loader_cleanup(char *mem, void *virtual_mem, Elf32_Phdr *p)
   munmap(virtual_mem, p->p_memsz);
 }
 
+
+//without bonus
 void sigsegv_handler(int signo, siginfo_t *info, void *context)
 {
   printf("Segmentation fault address = %p\n", info->si_addr);
@@ -37,55 +38,75 @@ void sigsegv_handler(int signo, siginfo_t *info, void *context)
     if (p->p_vaddr <= (int)info->si_addr && (int)info->si_addr <= p->p_vaddr + p->p_memsz)
     {
       printf("Starting virtual address of required segment = %x\n", p->p_vaddr);
-      printf("Size of segment = %d\n", (p->p_memsz - remaining_segment_size));
+      printf("Size of segment = %d\n", p->p_memsz);
       int page_size = 4096;
       int no_of_pages = 1;
-      // while (1)
-      // {
-      //   if (page_size < p->p_memsz)
-      //   {
-      //     no_of_pages++;
-      //     page_size = no_of_pages * 4096;
-      //   }
-      //   else
-      //   {
-      //     break;
-      //   }
-      // }
+      while (1)
+      {
+        if (page_size < p->p_memsz)
+        {
+          no_of_pages++;
+          page_size = no_of_pages * 4096;
+        }
+        else
+        {
+          break;
+        }
+      }
+      
       total_no_of_pages += no_of_pages;
-      double internal_fragmentation = 0;
-      int si = p->p_memsz - remaining_segment_size; 
-      if((page_size - si) >= 0)
-      {
-        internal_fragmentation = page_size - si;
-      }
-      else
-      {
-        internal_fragmentation = 0;
-        remaining_segment_size = 4096;
-      }
-      // int internal_fragmentation = page_size - p->p_memsz;
+      int internal_fragmentation = page_size - p->p_memsz;
       total_internal_fragmentation += internal_fragmentation;
       printf("No of pages allocated = %d\n", no_of_pages);
       printf("Page size alloacted for segment = %d\n", page_size);
-      printf("Internal fragmentation = %f\n", (internal_fragmentation/4096));
+      printf("Internal fragmentation = %d\n", internal_fragmentation);
       printf("..........................................................\n");
       virtual_mem = mmap(info->si_addr, page_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
       s = (void *)((uintptr_t)ehdr + p->p_offset);
-      memcpy(virtual_mem, s, page_size);
+      memcpy(virtual_mem, s, p->p_memsz);
     }
 
   }
 }
 
-// exit(signo);
 
-void *virtual_mem_allocator(Elf32_Phdr *p)
-{
-  // 3. Allocate memory of the size "p_memsz" using mmap function
-  //    and then copy the segment content
-  void *x = mmap(NULL, p->p_memsz, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
-  return x;
+//signal handler for bonus
+void bonus_handler(int signo, siginfo_t *info, void *context){
+  printf("Segmentation fault address = %p\n", info->si_addr);
+  no_of_page_faults++;
+  total_no_of_pages++;
+
+  Elf32_Phdr *p;
+  void *virtual_mem;
+  int size;
+  Elf32_Phdr *a;
+  int v_add;
+  unsigned int entry_point = ehdr->e_entry;
+  for (int i = 0; i < ehdr->e_phnum; i++)
+  {
+    p = phdr + i * (ehdr->e_phentsize) / sizeof(Elf32_Phdr);
+    // printf("p outside %x\n",p->p_vaddr);
+    if (p->p_vaddr <= (int)info->si_addr && (int)info->si_addr <= p->p_vaddr + p->p_memsz)
+    {
+      printf("Starting virtual address of required segment = %x\n", p->p_vaddr);
+      printf("Size of segment = %d\n", p->p_memsz);
+      int page_size = 4096;
+      int internal_fragmentation=0;
+      if ((int)(page_size+info->si_addr)>(p->p_vaddr+p->p_memsz)){
+        internal_fragmentation=(int)(page_size+info->si_addr)-(p->p_vaddr+p->p_memsz);
+      }      
+      // int internal_fragmentation = page_size - p->p_memsz;
+      total_internal_fragmentation += internal_fragmentation;
+      // printf("No of pages allocated = %d\n", no_of_pages);
+      // printf("Page size alloacted for segment = %d\n", page_size);
+      printf("Internal fragmentation = %d\n", internal_fragmentation);
+      printf("..........................................................\n");
+      virtual_mem = mmap(info->si_addr, page_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+      s = (void *)((uintptr_t)ehdr + p->p_offset+(info->si_addr-p->p_vaddr));
+      memcpy(virtual_mem, s,page_size );
+    }
+
+  }
 }
 
 void mem_alloc_checker(int f, ssize_t re_rtn)
@@ -166,9 +187,9 @@ void load_and_run_elf(char **exe)
 {
   struct sigaction sa;
   sa.sa_flags = SA_SIGINFO;
-  sa.sa_sigaction = sigsegv_handler;
+  // sa.sa_sigaction = sigsegv_handler;
+  sa.sa_sigaction = bonus_handler;
   sigaction(SIGSEGV, &sa, NULL);
-  // signal(SIGSEGV,sigsegv_handler);
 
   // 1. Load entire binary content into the memory from the ELF file.
   fd = open(exe[1], O_RDONLY);
@@ -198,7 +219,7 @@ void load_and_run_elf(char **exe)
   printf("User _start return value = %d\n", result);
   printf("Total Page Faults = %d\n", no_of_page_faults);
   printf("Total Page Allocations = %d\n", total_no_of_pages);
-  printf("Total internal fragmentation = %f\n", (total_internal_fragmentation/4096));
+  printf("Total internal fragmentation = %d\n", total_internal_fragmentation);
 
   // loader_cleanup(memory,virtual_mem,p);
 }
