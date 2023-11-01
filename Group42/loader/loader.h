@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <signal.h>
+#include <setjmp.h>
 
 void load_and_run_elf(char** exe);
 void loader_cleanup();
