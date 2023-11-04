@@ -2,101 +2,98 @@
 
 Elf32_Ehdr *ehdr;
 Elf32_Phdr *phdr;
-Elf32_Shdr *shdr;
+void *virtual_mem;
 int fd;
 void *s;
 int no_of_page_faults = 0;
 int total_no_of_pages = 0;
 double total_internal_fragmentation = 0;
-int remaining_segment_size = 0;
 
-/*
- * release memory and other cleanups
- */
-void loader_cleanup(char *mem, void *virtual_mem, Elf32_Phdr *p)
+void** fault_address;
+int fault_counter = 0; 
+
+
+
+void loader_cleanup(char *mem, int fd)
 {
+  close(fd);
   free(mem);
-  munmap(virtual_mem, p->p_memsz);
+  // munmap(virtual_mem, p->p_memsz);
+  for(int i=0; i < fault_counter; i++)
+  {
+    munmap(fault_address[i],4096);
+  }
+  free(fault_address);
 }
+
 
 void sigsegv_handler(int signo, siginfo_t *info, void *context)
 {
+  if(signo != SIGSEGV)
+  {
+    perror("error\n");
+    exit(1);
+  }
+
   printf("Segmentation fault address = %p\n", info->si_addr);
+  
+  
+  fault_address[fault_counter] = info->si_addr;
+  fault_counter++;
+  
   no_of_page_faults++;
 
   Elf32_Phdr *p;
-  void *virtual_mem;
-  int size;
-  Elf32_Phdr *a;
-  int v_add;
-  unsigned int entry_point = ehdr->e_entry;
+  int page_size = 4096;
+  int no_of_pages = 1;
+  int offset = 0;
+
   for (int i = 0; i < ehdr->e_phnum; i++)
   {
     p = phdr + i * (ehdr->e_phentsize) / sizeof(Elf32_Phdr);
-    // printf("p outside %x\n",p->p_vaddr);
     if (p->p_vaddr <= (int)info->si_addr && (int)info->si_addr <= p->p_vaddr + p->p_memsz)
     {
+      while(p->p_vaddr+offset+4096<=(int)info->si_addr)
+      {
+        offset+=4096;
+      }
+
       printf("Starting virtual address of required segment = %x\n", p->p_vaddr);
-      printf("Size of segment = %d\n", (p->p_memsz - remaining_segment_size));
-      int page_size = 4096;
-      int no_of_pages = 1;
-      // while (1)
-      // {
-      //   if (page_size < p->p_memsz)
-      //   {
-      //     no_of_pages++;
-      //     page_size = no_of_pages * 4096;
-      //   }
-      //   else
-      //   {
-      //     break;
-      //   }
-      // }
+      printf("Size of segment = %d\n", p->p_memsz );
+
+      
+      
       total_no_of_pages += no_of_pages;
-      double internal_fragmentation = 0;
-      int si = p->p_memsz - remaining_segment_size; 
-      if((page_size - si) >= 0)
+      double internal_fragmentation =0;
+
+      if ((int)(page_size-(p->p_memsz-offset))>0)
       {
-        internal_fragmentation = page_size - si;
+        internal_fragmentation=page_size-(p->p_memsz-offset);
       }
-      else
-      {
-        internal_fragmentation = 0;
-        remaining_segment_size = 4096;
-      }
-      // int internal_fragmentation = page_size - p->p_memsz;
+
       total_internal_fragmentation += internal_fragmentation;
+
+      printf("segment left to be loaded = %d\n",p->p_memsz - offset);
       printf("No of pages allocated = %d\n", no_of_pages);
       printf("Page size alloacted for segment = %d\n", page_size);
-      printf("Internal fragmentation = %f\n", (internal_fragmentation/4096));
+      printf("Internal fragmentation = %f KB\n", internal_fragmentation/1024);
       printf("..........................................................\n");
+      // ---mmap
       virtual_mem = mmap(info->si_addr, page_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
-      s = (void *)((uintptr_t)ehdr + p->p_offset);
+      if(virtual_mem == MAP_FAILED)
+      {
+        perror("mmap error\n");
+        exit(1);
+      }
+      s = (void *)((uintptr_t)ehdr + p->p_offset+offset);
+      // ---memcopy
       memcpy(virtual_mem, s, page_size);
+
     }
 
   }
 }
 
-// exit(signo);
-
-void *virtual_mem_allocator(Elf32_Phdr *p)
-{
-  // 3. Allocate memory of the size "p_memsz" using mmap function
-  //    and then copy the segment content
-  void *x = mmap(NULL, p->p_memsz, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
-  return x;
-}
-
-void mem_alloc_checker(int f, ssize_t re_rtn)
-{
-  if (re_rtn == -1)
-  {
-    printf("Error in allocating memory");
-    close(f);
-    exit(1);
-  }
-}
 
 // the following has been taken from this website: https://wiki.osdev.org/ELF_Tutorial
 int elf_check_file(Elf32_Ehdr *ehdr)
@@ -162,43 +159,88 @@ int elf_check_supported(Elf32_Ehdr *ehdr)
 }
 // --------------------------------------till here---------------------------------------------------------------
 
+
 void load_and_run_elf(char **exe)
 {
+  fault_address = malloc(sizeof(void*));
+  if(fault_address == NULL)
+  {
+    perror("malloc\n");
+    free(fault_address);
+    exit(1);
+  }
+  // ---signal handler
   struct sigaction sa;
   sa.sa_flags = SA_SIGINFO;
   sa.sa_sigaction = sigsegv_handler;
-  sigaction(SIGSEGV, &sa, NULL);
-  // signal(SIGSEGV,sigsegv_handler);
+  int check_signal = sigaction(SIGSEGV, &sa, NULL);
+  if(check_signal == -1)
+  {
+    perror("sigaction\n");
+    exit(1);
+  }
 
-  // 1. Load entire binary content into the memory from the ELF file.
+// ---reading the elf file
   fd = open(exe[1], O_RDONLY);
+  if(fd == -1)
+  {
+    perror("open the file\n");
+    close(fd);
+    exit(1);
+  }
+
   off_t f_size = lseek(fd, 0, SEEK_END);
-  lseek(fd, 0, SEEK_SET);
+  if(f_size == -1)
+  {
+    perror("lseek\n");
+    close(fd);
+    exit(1);
+  }
+
+  off_t check_lseek = lseek(fd, 0, SEEK_SET);
+  if(check_lseek == -1)
+  {
+    perror("lseek \n");
+    close(fd);
+    exit(1);
+  }
+
   char *memory = (char *)malloc(f_size);
+  if(memory == NULL)
+  {
+    perror("malloc\n");
+    free(memory);
+    exit(1);
+  }
+
   ssize_t readData = read(fd, memory, f_size);
-  mem_alloc_checker(fd, readData);
-  close(fd);
+  if(readData == -1)
+  {
+    perror("read");
+    close(fd);
+    exit(1);
+  }
 
-  // 2. Iterate through the PHDR table and find the section of PT_LOAD
-  //    type that contains the address of the entrypoint method in fib.c
+  // // ---closing fd
+  // close(fd);
+    
   ehdr = (Elf32_Ehdr *)memory;
+  elf_check_file(ehdr);
+  elf_check_supported(ehdr);
   phdr = (Elf32_Phdr *)(ehdr + (ehdr->e_phoff) / (sizeof(Elf32_Ehdr)));
-  Elf32_Phdr *p = phdr;
 
-  // printf("entry point %x\n",entry_point);
-
-  // 4. Navigate to the entrypoint address into the segment loaded in the memory in above step
-  // 5. Typecast the address to that of function pointer matching "_start" method in fib.c.
+// ----typecasting the entry address
   typedef int (*startfunction)(void);
   startfunction _start = (startfunction)ehdr->e_entry;
-  // printf("_start %p\n",_start);
-
-  // 6. Call the "_start" method and print the value returned from the "_start"
   int result = _start();
+
+  // ---printing final result
   printf("User _start return value = %d\n", result);
   printf("Total Page Faults = %d\n", no_of_page_faults);
   printf("Total Page Allocations = %d\n", total_no_of_pages);
-  printf("Total internal fragmentation = %f\n", (total_internal_fragmentation/4096));
+  printf("Total internal fragmentation = %f KB\n", (total_internal_fragmentation)/1024);
 
-  // loader_cleanup(memory,virtual_mem,p);
+ 
+
+  loader_cleanup(memory,fd);
 }
