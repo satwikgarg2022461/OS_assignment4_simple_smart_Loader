@@ -19,9 +19,14 @@ void loader_cleanup(char *mem, int fd)
   close(fd);
   free(mem);
   // munmap(virtual_mem, p->p_memsz);
+  size_t size = 4000;
   for(int i=0; i < fault_counter; i++)
   {
-    munmap(fault_address[i],4096);
+    void * fault = fault_address[i];
+    if (munmap(fault,size) == -1){
+      perror("munmap error\n");
+      exit(1);
+    }
   }
   free(fault_address);
 }
@@ -38,8 +43,7 @@ void sigsegv_handler(int signo, siginfo_t *info, void *context)
   printf("Segmentation fault address = %p\n", info->si_addr);
   
   
-  fault_address[fault_counter] = info->si_addr;
-  fault_counter++;
+  
   
   no_of_page_faults++;
 
@@ -80,15 +84,23 @@ void sigsegv_handler(int signo, siginfo_t *info, void *context)
       printf("..........................................................\n");
       // ---mmap
       virtual_mem = mmap(info->si_addr, page_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
+      // printf("fault %p\n",info->si_addr);
+      // printf("virtual mem %p\n",virtual_mem);
       if(virtual_mem == MAP_FAILED)
       {
         perror("mmap error\n");
         exit(1);
       }
+      fault_address[fault_counter] = virtual_mem;
+      fault_counter++;
+
       s = (void *)((uintptr_t)ehdr + p->p_offset+offset);
       // ---memcopy
-      memcpy(virtual_mem, s, page_size);
-
+      void * cpyerror=memcpy(virtual_mem, s, page_size);
+      if (cpyerror==NULL){
+        perror("memcpy error\n");
+        exit(1);
+      }
     }
 
   }
@@ -241,6 +253,6 @@ void load_and_run_elf(char **exe)
   printf("Total internal fragmentation = %f KB\n", (total_internal_fragmentation)/1024);
 
  
-
+// --clean up
   loader_cleanup(memory,fd);
 }
